@@ -1,60 +1,72 @@
-var http = require("http"),
-    url = require("url"),
-    superagent = require("superagent"),
-    cheerio = require("cheerio"),
-    eventproxy = require('eventproxy');
+var http = require('http'), // 创建本地 http 服务
+    request = require('request'), // 对外发送 http 请求
+    cheerio = require('cheerio'), // 服务端的 JQ
+    eventproxy = require('eventproxy'), // 事件处理
+    fs = require('fs'); // 文件处理
 
-http.createServer(start).listen(3000);
+http.createServer(start).listen(3000); // 创建 http 服务，监听 3000 端口
 console.log('listen 3000');
 
-// 主start程序
 function start(req, res) {
-    var ep = new eventproxy(),
-    urlsArray = [], //存放爬取网址
-    themes = []; // 存放所有主题信息
-    ep.on('seeUrls',function () {
-        console.log(themes.length);
-        res.write('<br/>');
-        res.write('theme length is: ' + themeLen + '<br/>');
-        urlsArray.forEach(function (url,i) {
-            ep.emit('getStar',i)
+    var ep = new eventproxy(), // 事件实例
+        now = 0, // 统计已获取到的信息数量
+        themes = []; // 存放所有主题信息
+
+    // 爬虫结束，排序并输出到文件和页面上
+    ep.on('endReq', function () {
+        console.log('done');
+        themes.sort((v1, v2) => v2.star - v1.star)
+        fs.writeFile('./result.text', JSON.stringify(themes), function (err) {
+            if (err) throw err;
+            console.log('write in file');
+        });
+        themes.forEach((obj) => {
+            res.write(obj.name + ', star: ' + obj.star + '<br/>');
         })
-    })
-    ep.on('getStar',function (i) {
-        superagent.get(urlsArray[i])
-            .end(function (err, pres) {
-                console.log(i,themes[i]);
-                try { // 防止页面访问失败或页面非 github 而报错导致崩溃
-                    var name = themes[i];
-                    var $ = cheerio.load(pres.text);
-                    var count = $('.social-count').length?$('.social-count').eq(1).html():0;
-                    themes[i].star=count;
-                } catch (err) {
+        res.end();
+    });
 
-                }
-                ep.emit('endReq');
-            }); 
+    // 触发所有主题链接
+    ep.on('seeUrls', function () {
+        res.write('<br/>');
+        res.write('theme length is: ' + themes.length + '<br/>');
+        themes.forEach(function (obj, i) {
+            setTimeout(function () {
+                ep.emit('getStar', i);
+            }, 200 * i) // 友善爬虫哈哈哈
+
+        })
+
     })
-    superagent.get('https://hexo.io/themes/')
-        .end(function (err, pres) {
-            var $ = cheerio.load(pres.text);
-            var curPageUrls = $('.plugin-name');
-            themeLen = curPageUrls.length;
-            for (var i = 0; i < curPageUrls.length; i++) {
-                var articleUrl = curPageUrls.eq(i).attr('href');
-                urlsArray.push(articleUrl);
-                var obj = {};
-                obj.name=curPageUrls.eq(i).html()
-                themes.push(obj);
+
+    // 请求主题所在 github，爬取关注数 star
+    ep.on('getStar', function (i) {
+        request(themes[i].url, { timeout: 6000 }, function (err, response, body) {
+            console.log((++now * 100 / themes.length | 0) + '%', themes[i]); // 输出当前进度和爬取主题
+            try { // 防止链接非 github 或访问失败导致数据处理报错
+                var $ = cheerio.load(body),
+                count = $('.social-count').length ? $('.social-count').eq(1).html() : '0';
+                themes[i].star = +count.replace(/(,+)|(\s+)/g, ''); // 去掉空格和 ,
+            } catch (err) {
+                themes[i].star = 0
             }
-            ep.after('endReq',themes.length, function () {
-                themes.sort((v1, v2)=>v1.star>v2.star)
-                themes.forEach((obj, i)=>{
-                    res.write('theme name is: ' + obj.name + ', star:'+obj.star+'<br/>');
-                })              
+            if (now == themes.length) {
+                ep.emit('endReq'); // 触发结束事件
+            }
+        });
+    })
 
-                res.end();
-            });
-            ep.emit('seeUrls');
-        });    
+    // 访问页面，获取所有主题的链接和名称
+    request('https://hexo.io/themes/', function (err, response, body) {
+        var $ = cheerio.load(body);
+        var curPageUrls = $('.plugin-name');
+        themeLen = curPageUrls.length;
+        for (var i = 0; i < themeLen; i++) {
+            var obj = {};
+            obj.url = curPageUrls.eq(i).attr('href');
+            obj.name = curPageUrls.eq(i).html()
+            themes.push(obj);
+        }
+        ep.emit('seeUrls');
+    });
 }
